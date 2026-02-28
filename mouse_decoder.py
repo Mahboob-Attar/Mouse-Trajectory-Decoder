@@ -1,75 +1,88 @@
 import sys
-import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 
-def load_velocity_data(file_path: str) -> pd.DataFrame:
-    df = pd.read_csv(file_path)
-
-    required_columns = {"timestamp", "velocity_x", "velocity_y"}
-    if not required_columns.issubset(df.columns):
-        raise ValueError("CSV missing required columns.")
-
-    return df
+def load_velocity_data(file_path: str):
+    return pd.read_csv(file_path)
 
 
-def reconstruct_trajectory(df: pd.DataFrame):
+def detect_word_segments(df, threshold=0.5, pause_frames=20):
     dx = df["velocity_x"].values
     dy = df["velocity_y"].values
 
-    x_points = []
-    y_points = []
+    speed = np.abs(dx) + np.abs(dy)
 
-    current_x = 0
-    current_y = 0
+    segments = []
+    start = None
+    pause_count = 0
 
-    pause_counter = 0
-    pause_limit = 10
+    for i in range(len(speed)):
 
-    for i in range(len(dx)):
-        movement = abs(dx[i]) + abs(dy[i])
-
-        if movement < 0.3:
-            pause_counter += 1
+        if speed[i] > threshold:
+            if start is None:
+                start = i
+            pause_count = 0
         else:
-            pause_counter = 0
+            pause_count += 1
 
-        if pause_counter >= pause_limit:
-            x_points.append(np.nan)
-            y_points.append(np.nan)
-            continue
+            if pause_count >= pause_frames and start is not None:
+                end = i - pause_frames
+                segments.append((start, end))
+                start = None
 
-        current_x += dx[i]
-        current_y += dy[i]
+    if start is not None:
+        segments.append((start, len(speed)-1))
 
-        x_points.append(current_x)
-        y_points.append(current_y)
+    return segments
 
-    x = np.array(x_points)
-    y = np.array(y_points)
 
-    x -= np.nanmean(x)
-    y -= np.nanmean(y)
+def reconstruct(df):
+    dx = df["velocity_x"].values
+    dy = df["velocity_y"].values
+
+    x = np.cumsum(dx)
+    y = np.cumsum(dy)
+
+    x -= np.mean(x)
+    y -= np.mean(y)
     y = -y
 
     return x, y
 
 
-def plot_trajectory(x: np.ndarray, y: np.ndarray, title: str):
-    os.makedirs("plots", exist_ok=True)
+def animate_segment(x, y, title):
 
-    plt.figure(figsize=(6, 6))
-    plt.plot(x, y, linewidth=1)
-    plt.gca().set_aspect("equal", adjustable="box")
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    ax.set_xlim(np.nanmin(x), np.nanmax(x))
+    ax.set_ylim(np.nanmin(y), np.nanmax(y))
+
+    line, = ax.plot([], [], lw=1, color="black")
+
+    step = max(1, len(x)//1500)
+
+    def update(frame):
+        i = frame * step
+        line.set_data(x[:i], y[:i])
+        return line,
+
+    frames = len(x)//step
+
+    ani = FuncAnimation(
+        fig,
+        update,
+        frames=frames,
+        interval=15,
+        blit=False
+    )
+
     plt.title(title)
-    plt.axis("off")
-    plt.tight_layout()
-
-    filename = title.replace("%", "pct").replace(" ", "_") + ".png"
-    plt.savefig(os.path.join("plots", filename), dpi=400)
-    plt.close()
+    plt.show()
 
 
 def main():
@@ -77,31 +90,21 @@ def main():
         print("Usage: python mouse_decoder.py <mouse_velocities.csv>")
         sys.exit(1)
 
-    file_path = sys.argv[1]
+    df = load_velocity_data(sys.argv[1])
 
-    df = load_velocity_data(file_path)
-    n = len(df)
+    print("Detecting word segments...")
+    segments = detect_word_segments(df)
 
-    print("Total rows:", n)
+    print(f"Detected {len(segments)} word segments")
 
-    step = int(n * 0.15)
+    for i, (start, end) in enumerate(segments):
+        print(f"Word {i+1}: rows {start} to {end}")
 
-    for i in range(0, n, step):
-        start_pct = int((i / n) * 100)
-        end_pct = int(((min(i + step, n)) / n) * 100)
+        df_chunk = df.iloc[start:end]
+        x, y = reconstruct(df_chunk)
 
-        df_chunk = df.iloc[i : i + step]
-        x, y = reconstruct_trajectory(df_chunk)
-
-        title = f"{start_pct}% to {end_pct}%"
-        plot_trajectory(x, y, title)
-
-    # Also save full dataset
-    x, y = reconstruct_trajectory(df)
-    plot_trajectory(x, y, "Full Dataset")
-
-    print("All 15% segment plots saved in 'plots/' folder.")
+        animate_segment(x, y, f"Word {i+1}")
 
 
 if __name__ == "__main__":
-    main()
+    main() 
