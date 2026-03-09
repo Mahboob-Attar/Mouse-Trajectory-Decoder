@@ -5,15 +5,22 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 
+# -----------------------------
+# Load CSV
+# -----------------------------
 def load_velocity_data(file_path: str):
     return pd.read_csv(file_path)
 
 
+# -----------------------------
+# Detect pauses between words
+# -----------------------------
 def detect_word_segments(df, threshold=0.5, pause_frames=20):
+
     dx = df["velocity_x"].values
     dy = df["velocity_y"].values
 
-    speed = np.abs(dx) + np.abs(dy)
+    speed = np.sqrt(dx**2 + dy**2)
 
     segments = []
     start = None
@@ -25,6 +32,7 @@ def detect_word_segments(df, threshold=0.5, pause_frames=20):
             if start is None:
                 start = i
             pause_count = 0
+
         else:
             pause_count += 1
 
@@ -39,36 +47,72 @@ def detect_word_segments(df, threshold=0.5, pause_frames=20):
     return segments
 
 
-def reconstruct(df):
+# -----------------------------
+# Convert velocity → position
+# -----------------------------
+def reconstruct(df, scale=15):
+
     dx = df["velocity_x"].values
     dy = df["velocity_y"].values
 
-    x = np.cumsum(dx)
-    y = np.cumsum(dy)
+    x = np.cumsum(dx) * scale
+    y = np.cumsum(dy) * scale
 
-    x -= np.mean(x)
-    y -= np.mean(y)
-    y = -y
+    y = -y   # flip vertically
 
     return x, y
 
 
+# -----------------------------
+# Smooth trajectory
+# -----------------------------
+def smooth(x, y):
+
+    from scipy.signal import savgol_filter
+
+    x = savgol_filter(x, 21, 3)
+    y = savgol_filter(y, 21, 3)
+
+    return x, y
+
+
+# -----------------------------
+# Static plot (BEST for reading)
+# -----------------------------
+def plot_static(x, y, title):
+
+    plt.figure(figsize=(12,4))
+    plt.plot(x, y)
+    plt.axis("equal")
+    plt.axis("off")
+
+    for i in range(0, len(x), 200):
+        plt.text(x[i], y[i], str(i), fontsize=8)
+
+    plt.show()
+
+# -----------------------------
+# Animation (optional)
+# -----------------------------
 def animate_segment(x, y, title):
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    fig, ax = plt.subplots(figsize=(6,6))
+
     ax.set_aspect("equal")
     ax.axis("off")
 
-    ax.set_xlim(np.nanmin(x), np.nanmax(x))
-    ax.set_ylim(np.nanmin(y), np.nanmax(y))
+    ax.set_xlim(np.min(x), np.max(x))
+    ax.set_ylim(np.min(y), np.max(y))
 
-    line, = ax.plot([], [], lw=1, color="black")
+    line, = ax.plot([], [], lw=2, color="black")
 
-    step = max(1, len(x)//1500)
+    step = max(1, len(x)//1000)
 
     def update(frame):
+
         i = frame * step
         line.set_data(x[:i], y[:i])
+
         return line,
 
     frames = len(x)//step
@@ -77,34 +121,48 @@ def animate_segment(x, y, title):
         fig,
         update,
         frames=frames,
-        interval=15,
-        blit=False
+        interval=10
     )
 
     plt.title(title)
     plt.show()
 
 
+# -----------------------------
+# MAIN
+# -----------------------------
 def main():
+
     if len(sys.argv) != 2:
-        print("Usage: python mouse_decoder.py <mouse_velocities.csv>")
+        print("Usage: python mouse_decoder.py mouse_velocities.csv")
         sys.exit(1)
 
-    df = load_velocity_data(sys.argv[1])
+    file_path = sys.argv[1]
+
+    df = load_velocity_data(file_path)
 
     print("Detecting word segments...")
     segments = detect_word_segments(df)
 
-    print(f"Detected {len(segments)} word segments")
+    print(f"Detected {len(segments)} segments")
 
     for i, (start, end) in enumerate(segments):
-        print(f"Word {i+1}: rows {start} to {end}")
+
+        print(f"Segment {i+1}: rows {start} → {end}")
 
         df_chunk = df.iloc[start:end]
+
         x, y = reconstruct(df_chunk)
 
-        animate_segment(x, y, f"Word {i+1}")
+        # optional smoothing
+        x, y = smooth(x, y)
+
+        # show plot
+        plot_static(x, y, f"Segment {i+1}")
+
+        # optional animation
+        animate_segment(x, y, f"Segment {i+1}")
 
 
 if __name__ == "__main__":
-    main() 
+    main()
