@@ -1,168 +1,77 @@
-import sys
-import pandas as pd
-import numpy as np
+"""Decode the handwritten string hidden in mouse_velocities.csv.
+
+Steps: load -> integrate velocities to positions -> split into strokes at idle
+gaps -> plot each stroke -> (visual reading) -> verify with check_answer.py.
+Run:  python solve.py
+"""
+import subprocess, sys
+import numpy as np, pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 
+CSV = "data/mouse_velocities.csv"
+MIN_GAP = 30          # >=30 consecutive all-zero samples (~0.45 s) = pause between letters
+# Letters read by eye from images/letters_grid.png (stroke index -> character)
+READING = ["M","O","N","K","E","Y"," ","M","I","N","D","P","O","N","G"]
 
-# -----------------------------
-# Load CSV
-# -----------------------------
-def load_velocity_data(file_path: str):
-    return pd.read_csv(file_path)
+# 1. Load. NOTE: velocity_y is used as-is (not zeroed) - vertical strokes are needed.
+df = pd.read_csv(CSV)
+vx, vy = df.velocity_x.values, df.velocity_y.values
 
+# 2. Integrate velocity -> position (screen y points down, so flip for plotting)
+x, y = np.cumsum(vx), -np.cumsum(vy)
+fig, ax = plt.subplots(figsize=(10, 8))
+ax.plot(x, y, lw=0.5); ax.set_aspect("equal")
+ax.set_title("All samples integrated: letters overlap in one spot")
+fig.savefig("images/01_full_trajectory.png", dpi=100); plt.close(fig)
 
-# -----------------------------
-# Detect pauses between words
-# -----------------------------
-def detect_word_segments(df, threshold=0.5, pause_frames=20):
+# 3. Find idle gaps (runs of exact zero velocity)
+idle = (vx == 0) & (vy == 0)
+runs, i = [], 0
+while i < len(idle):
+    if idle[i]:
+        j = i
+        while j < len(idle) and idle[j]: j += 1
+        if j - i >= MIN_GAP: runs.append((i, j))
+        i = j
+    else: i += 1
+print("idle gaps:", runs)
 
-    dx = df["velocity_x"].values
-    dy = df["velocity_y"].values
+fig, ax = plt.subplots(figsize=(14, 3))
+ax.plot(np.hypot(vx, vy), lw=0.4)
+for a, b in runs: ax.axvspan(a, b, color="red", alpha=0.4)
+ax.set_title("Speed over time; red = idle gaps separating letters")
+fig.savefig("images/02_idle_gaps.png", dpi=100); plt.close(fig)
 
-    speed = np.sqrt(dx**2 + dy**2)
+# 4. Split into strokes
+bounds = [0] + [b for _, b in runs]
+ends = [a for a, _ in runs] + [len(df)]
+strokes = [(s, e) for s, e in zip(bounds, ends) if e > s]
+print("strokes:", len(strokes))
 
-    segments = []
-    start = None
-    pause_count = 0
+# 5. Plot each stroke (colored by time: blue=start, red=end; the dark-red tail is the
 
-    for i in range(len(speed)):
+# cursor returning to the starting point before the next letter)
+cols = 5; rows = int(np.ceil(len(strokes) / cols))
+fig, axs = plt.subplots(rows, cols, figsize=(20, 4.2 * rows))
 
-        if speed[i] > threshold:
-            if start is None:
-                start = i
-            pause_count = 0
+for k, (ax, (s, e)) in enumerate(zip(axs.flat, strokes)):
+    px = np.cumsum(vx[s:e]); py = -np.cumsum(vy[s:e])
+    ax.scatter(px, py, c=np.arange(len(px)), s=3, cmap="jet")
+    ax.set_aspect("equal"); ax.set_title(f"stroke {k} -> '{READING[k]}'")
+    
+    fig.savefig  # (individual image below)
+    f2, a2 = plt.subplots(figsize=(5, 5))
+    a2.scatter(px, py, c=np.arange(len(px)), s=3, cmap="jet"); a2.set_aspect("equal")
+    a2.set_title(f"stroke {k} -> '{READING[k]}'")
+    f2.savefig(f"images/stroke_{k:02d}.png", dpi=80); plt.close(f2)
+    
+for ax in list(axs.flat)[len(strokes):]: ax.axis("off")
+fig.savefig("images/letters_grid.png", dpi=70); plt.close(fig)
 
-        else:
-            pause_count += 1
-
-            if pause_count >= pause_frames and start is not None:
-                end = i - pause_frames
-                segments.append((start, end))
-                start = None
-
-    if start is not None:
-        segments.append((start, len(speed)-1))
-
-    return segments
-
-
-# -----------------------------
-# Convert velocity → position
-# -----------------------------
-def reconstruct(df, scale=15):
-
-    dx = df["velocity_x"].values
-    dy = df["velocity_y"].values
-
-    x = np.cumsum(dx) * scale
-    y = np.cumsum(dy) * scale
-
-    y = -y   # flip vertically
-
-    return x, y
-
-
-# -----------------------------
-# Smooth trajectory
-# -----------------------------
-def smooth(x, y):
-
-    from scipy.signal import savgol_filter
-
-    x = savgol_filter(x, 21, 3)
-    y = savgol_filter(y, 21, 3)
-
-    return x, y
-
-
-# -----------------------------
-# Static plot (BEST for reading)
-# -----------------------------
-def plot_static(x, y, title):
-
-    plt.figure(figsize=(12,4))
-    plt.plot(x, y)
-    plt.axis("equal")
-    plt.axis("off")
-
-    for i in range(0, len(x), 200):
-        plt.text(x[i], y[i], str(i), fontsize=8)
-
-    plt.show()
-
-# -----------------------------
-# Animation (optional)
-# -----------------------------
-def animate_segment(x, y, title):
-
-    fig, ax = plt.subplots(figsize=(6,6))
-
-    ax.set_aspect("equal")
-    ax.axis("off")
-
-    ax.set_xlim(np.min(x), np.max(x))
-    ax.set_ylim(np.min(y), np.max(y))
-
-    line, = ax.plot([], [], lw=2, color="black")
-
-    step = max(1, len(x)//1000)
-
-    def update(frame):
-
-        i = frame * step
-        line.set_data(x[:i], y[:i])
-
-        return line,
-
-    frames = len(x)//step
-
-    ani = FuncAnimation(
-        fig,
-        update,
-        frames=frames,
-        interval=10
-    )
-
-    plt.title(title)
-    plt.show()
-
-
-# -----------------------------
-# MAIN
-# -----------------------------
-def main():
-
-    if len(sys.argv) != 2:
-        print("Usage: python mouse_decoder.py mouse_velocities.csv")
-        sys.exit(1)
-
-    file_path = sys.argv[1]
-
-    df = load_velocity_data(file_path)
-
-    print("Detecting word segments...")
-    segments = detect_word_segments(df)
-
-    print(f"Detected {len(segments)} segments")
-
-    for i, (start, end) in enumerate(segments):
-
-        print(f"Segment {i+1}: rows {start} → {end}")
-
-        df_chunk = df.iloc[start:end]
-
-        x, y = reconstruct(df_chunk)
-
-        # optional smoothing
-        x, y = smooth(x, y)
-
-        # show plot
-        plot_static(x, y, f"Segment {i+1}")
-
-        # optional animation
-        animate_segment(x, y, f"Segment {i+1}")
-
-
-if __name__ == "__main__":
-    main()
+# 6. Verify
+answer = "".join(READING)
+print("answer:", answer)
+r = subprocess.run([sys.executable, "data/check_answer.py", answer], capture_output=True, text=True)
+print(r.stdout.strip()[-6:], "(exit code", r.returncode, ")")
